@@ -14,8 +14,6 @@
  ==============================================================================*/
 
 // See docs in ../ops/parsing_ops.cc.
-
-
 /*
  change tensorflow offical DecodeCSVOp to DecodeCSVSelectedColumnsOp that only parse the columns in field_indices of a csv file
 
@@ -31,7 +29,7 @@
  # if field_indices = tf.constant([0,1,2],dtype=tf.int32); and there are 3 columns in the csv, this function is equivelant to tf.decode_csv(value, record_defaults=record_defaults)
 
  for col in cols:  # in case shape reference registered in C++ does not work
-     col.set_shape([])
+ col.set_shape([])
 
  See the link below for more infomation on how to add an custom op for tensorflow
  https://www.tensorflow.org/versions/r0.10/how_tos/adding_an_op/
@@ -59,7 +57,7 @@ using namespace tensorflow;
 class DecodeCSVSelectedColumnsOp: public OpKernel {
 public:
 	explicit DecodeCSVSelectedColumnsOp(OpKernelConstruction* ctx) :
-			OpKernel(ctx) {
+			OpKernel(ctx), num_first_n_columns_to_extract_(-1) {
 		string delim;
 
 		OP_REQUIRES_OK(ctx, ctx->GetAttr("OUT_TYPE", &out_type_));
@@ -81,42 +79,46 @@ public:
 		OP_REQUIRES_OK(ctx,
 				ctx->input_list("record_defaults", &record_defaults));
 
-		for (int i = 0; i < record_defaults.size(); ++i) {
-			OP_REQUIRES(ctx, record_defaults[i].NumElements() < 2,
-					errors::InvalidArgument(
-							"There should only be 1 default per field but field ",
-							i, " has ", record_defaults[i].NumElements()));
-		}
+		if (num_first_n_columns_to_extract_ < 0) {
 
-		//set field_indices
-		const Tensor* field_indices_tensor;
-		OP_REQUIRES_OK(ctx, ctx->input("field_indices", &field_indices_tensor));
-		auto field_indices = field_indices_tensor->flat<int>();
-		std::vector<int> field_indices_vec(record_defaults.size());
-		int maxColIndex = -1;
-		if (field_indices.size() != 0) {
-			OP_REQUIRES(ctx, field_indices.size() == record_defaults.size(),
-					errors::InvalidArgument(
-							"field_indices must be empty or the same size as record_defaults"));
-			for (int i = 0; i < field_indices_vec.size(); ++i) {
-				int idx = field_indices(i);
-				OP_REQUIRES(ctx, idx >= 0,
-						errors::InvalidArgument("the ", i,
-								"field_indice is smaller than 0: the index is ",
-								idx));
-				field_indices_vec[i] = idx;
-				if (idx > maxColIndex)
-					maxColIndex = idx;
+			for (int i = 0; i < record_defaults.size(); ++i) {
+				OP_REQUIRES(ctx, record_defaults[i].NumElements() < 2,
+						errors::InvalidArgument(
+								"There should only be 1 default per field but field ",
+								i, " has ", record_defaults[i].NumElements()));
 			}
-		} else {  // use default column index, 0,1,2,...
-			for (int i = 0; i < field_indices_vec.size(); ++i) {
-				int idx = i;
-				field_indices_vec[i] = idx;
-				if (idx > maxColIndex)
-					maxColIndex = idx;
+
+			//set field_indices
+			const Tensor* field_indices_tensor;
+			OP_REQUIRES_OK(ctx,
+					ctx->input("field_indices", &field_indices_tensor));
+			auto field_indices = field_indices_tensor->flat<int>();
+			field_indices_vec_.resize(record_defaults.size());
+			int maxColIndex = -1;
+			if (field_indices.size() != 0) {
+				OP_REQUIRES(ctx, field_indices.size() == record_defaults.size(),
+						errors::InvalidArgument(
+								"field_indices must be empty or the same size as record_defaults"));
+				for (int i = 0; i < field_indices_vec_.size(); ++i) {
+					int idx = field_indices(i);
+					OP_REQUIRES(ctx, idx >= 0,
+							errors::InvalidArgument("the ", i,
+									"field_indice is smaller than 0: the index is ",
+									idx));
+					field_indices_vec_[i] = idx;
+					if (idx > maxColIndex)
+						maxColIndex = idx;
+				}
+			} else {  // use default column index, 0,1,2,...
+				for (int i = 0; i < field_indices_vec_.size(); ++i) {
+					int idx = i;
+					field_indices_vec_[i] = idx;
+					if (idx > maxColIndex)
+						maxColIndex = idx;
+				}
 			}
+			num_first_n_columns_to_extract_ = maxColIndex + 1;
 		}
-		const int num_first_n_columns_to_extract = maxColIndex + 1;
 
 		//
 		auto records_t = records->flat<string>();
@@ -133,17 +135,18 @@ public:
 		for (int64 i = 0; i < records_size; ++i) {
 			const StringPiece record(records_t(i));
 			std::vector < string > fields;
-			ExtractFields(ctx, record, &fields, num_first_n_columns_to_extract);
-			OP_REQUIRES(ctx, fields.size() == num_first_n_columns_to_extract,
+			ExtractFields(ctx, record, &fields);
+			OP_REQUIRES(ctx, fields.size() == num_first_n_columns_to_extract_,
 					errors::InvalidArgument("Expect at least ",
-							num_first_n_columns_to_extract, " fields but have ",
-							fields.size(), " in record ", i));
+							num_first_n_columns_to_extract_,
+							" fields but have ", fields.size(), " in record ",
+							i));
 
 			// Check each field in the record
 			for (int f = 0; f < static_cast<int>(out_type_.size()); ++f) {
 				const DataType& dtype = out_type_[f];
 
-				auto column_value_str = fields[field_indices_vec[f]];
+				auto column_value_str = fields[field_indices_vec_[f]];
 
 				switch (dtype) {
 				case DT_INT32: {
@@ -242,13 +245,15 @@ public:
 private:
 	std::vector<DataType> out_type_;
 	char delim_;
+	std::vector<int> field_indices_vec_;
+	int num_first_n_columns_to_extract_;
 
 	inline void ExtractFields(OpKernelContext* ctx, StringPiece input,
-			std::vector<string>* result, const int maxColumn2Retrieve) {
+			std::vector<string>* result) {
 		int64 current_idx = 0;
 		if (!input.empty()) {
 			while (static_cast<size_t>(current_idx) < input.size()
-					&& result->size() < maxColumn2Retrieve) {
+					&& result->size() < num_first_n_columns_to_extract_) {
 				if (input[current_idx] == '\n' || input[current_idx] == '\r') {
 					current_idx++;
 					continue;
