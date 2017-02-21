@@ -16,7 +16,7 @@
 // See docs in ../ops/parsing_ops.cc.
 /*
  change tensorflow offical DecodeCSVOp to DecodeCSVSelectedColumnsOp that only parse the columns in field_indices of a csv file
-
+ record_defaults and field_indices can not be changed (they must be tf.constant, rather than tf.Variable neither tf.placeholder ) for speeding up as we parse only one example at a time when using tensorlow's reader pipeline.
 
  compile the file as follows:
  TF_INC=$(python -c 'import tensorflow as tf; print(tf.sysconfig.get_include())')
@@ -80,7 +80,6 @@ public:
 				ctx->input_list("record_defaults", &record_defaults));
 
 		if (num_first_n_columns_to_extract_ < 0) {
-
 			for (int i = 0; i < record_defaults.size(); ++i) {
 				OP_REQUIRES(ctx, record_defaults[i].NumElements() < 2,
 						errors::InvalidArgument(
@@ -351,6 +350,8 @@ Convert CSV records to tensors. Each column maps to one tensor.
 RFC 4180 format is expected for the CSV records.
 (https://tools.ietf.org/html/rfc4180)
 Note that we allow leading and trailing spaces with int or float field.
+
+Note that record_defaults and field_indices can not be changed (they must be tf.constant, rather than tf.Variable neither tf.placeholder ) for speeding up as we parse only one example at a time when using tensorlow's reader pipeline.
 
 records: Each string is a record/row in the csv and all records should have
   the same format.
